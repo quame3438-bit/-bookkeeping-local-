@@ -8,7 +8,7 @@
 <meta name="apple-mobile-web-app-title" content="收支本">
 <link rel="manifest" href="./manifest.webmanifest">
 <link rel="apple-touch-icon" href="./icon-192.png">
-<title>收支本 - 统一照片重做版</title>
+<title>收支本</title>
 <style>
 *{box-sizing:border-box}
 body{margin:0;background:#f5f5f7;color:#1d1d1f;font-family:-apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif}
@@ -81,32 +81,12 @@ button{border:0;border-radius:11px;font-size:14px;font-weight:700;cursor:pointer
 <script src="https://cdn.jsdelivr.net/npm/exceljs@4.4.0/dist/exceljs.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/file-saver@2.0.5/dist/FileSaver.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.57.4/dist/umd/supabase.min.js"></script>
 
 </head>
 <body>
 <div class="wrap">
 <h1>收支本</h1>
-<div class="card">
-  <div class="title"><span>☁️ 云同步</span></div>
-  <div id="cloudLoginPanel">
-    <div class="auth-grid">
-      <input id="cloudEmail" type="email" inputmode="email" autocomplete="username" placeholder="邮箱">
-      <input id="cloudPassword" type="password" autocomplete="current-password" placeholder="密码（至少 6 位）">
-    </div>
-    <div class="auth-actions">
-      <button class="dark" id="cloudLogin" type="button">登录并同步</button>
-      <button class="light" id="cloudSignup" type="button">第一次使用：注册</button>
-    </div>
-  </div>
-  <div class="auth-actions" id="cloudUserPanel" hidden>
-    <button class="dark" id="cloudUploadNow" type="button">上传本机数据</button>
-    <button class="light" id="cloudDownloadNow" type="button">下载云端数据</button>
-    <button class="light" id="cloudLogout" type="button">退出云同步</button>
-  </div>
-  <div id="cloudStatus" class="cloud-status cloud-warn">尚未登录；账本仍会正常保存在本机</div>
-  <div class="hint">沿用原来的云账号。总收入、今日收入、全部余额、账本、明细、照片和字号都会同步。</div>
-</div>
+
 <div class="card">
   <div class="title"><span>备份与恢复</span></div>
   <div class="grid">
@@ -208,16 +188,11 @@ function importBackup(input){
 }
 
 const KI='multi_income_v1', KB='multi_balance_v1', KD='multi_ledger_data_v1', KF='summary_font_size_v1';
-const CLOUD_PROJECT_URL='https://braarnzywbodyfdclodc.supabase.co';
-const CLOUD_PUBLISHABLE_KEY='sb_publishable_JecnrG-198PERwUD5lFhaQ_wc0vV4Lj';
-const CLOUD_TABLE='bookkeeping_cloud';
-const CLOUD_LOCAL_CHANGED_KEY='bookkeeping_cloud_local_changed_at_v1';
 let income=Number(localStorage.getItem(KI)||0);
 let balance=Number(localStorage.getItem(KB)||0);
 let allData=JSON.parse(localStorage.getItem(KD)||'{}');
 let viewDate=new Date();
 let summaryFontSize=Math.min(24,Math.max(12,Number(localStorage.getItem(KF)||14)));
-let cloudClient=null,cloudSession=null,cloudReady=false,cloudTracking=false,cloudApplying=false,cloudSaving=false,cloudSaveAgain=false,cloudSaveTimer=null;
 
 function applySummaryFont(){
   document.documentElement.style.setProperty('--summary-font-size',summaryFontSize+'px');
@@ -573,7 +548,7 @@ function renderLedgers(){
       <div class="ledger-actions">
         ${l.savedAt
           ? `<button class="light" onclick="editLedger(${l.id})">修改</button><button class="dark" disabled>已保存</button>`
-          : `<button class="dark" onclick="uploadSave(${l.id})">上传保存</button>`}
+          : `<button class="dark" onclick="uploadSave(${l.id})">保存</button>`}
       </div>
       ${l.savedAt?`<div class="saved">已保存：${l.savedAt}</div>`:''}
     </div>`;
@@ -810,246 +785,7 @@ async function exportZipWithPhotos(){
 }
 
 
-function setCloudStatus(message,tone=''){
-  const el=document.querySelector('#cloudStatus');
-  if(!el)return;
-  el.textContent=message;
-  el.className='cloud-status'+(tone?' '+tone:'');
-}
-
-function cloudErrorText(error){
-  const text=String(error&&error.message||error||'');
-  if(/invalid login credentials/i.test(text))return '邮箱或密码不正确';
-  if(/email not confirmed/i.test(text))return '邮箱尚未确认';
-  if(/user already registered/i.test(text))return '这个邮箱已经注册，请直接登录';
-  if(/email rate limit exceeded/i.test(text))return '注册邮件发送次数过多，请稍后再试';
-  if(/password/i.test(text)&&/6|characters|short/i.test(text))return '密码至少需要 6 位';
-  if(/failed to fetch|network/i.test(text))return '网络连接失败，请稍后再试';
-  return text||'未知错误';
-}
-
-function updateCloudPanels(){
-  const loggedIn=!!(cloudSession&&cloudSession.user);
-  document.querySelector('#cloudLoginPanel').hidden=loggedIn;
-  document.querySelector('#cloudUserPanel').hidden=!loggedIn;
-  if(loggedIn&&!cloudReady){
-    setCloudStatus(`已登录 ${cloudSession.user.email||'云账号'}，正在同步…`,'cloud-warn');
-  }
-}
-
-function collectCloudPayload(){
-  return {
-    type:'bookkeeping-cloud',
-    version:2,
-    income:Number(income)||0,
-    balance:Number(balance)||0,
-    allData,
-    summaryFontSize
-  };
-}
-
-function hasMeaningfulLocalData(){
-  return income!==0 || balance!==0 || Object.values(allData||{}).some(list=>Array.isArray(list)&&list.length>0);
-}
-
-async function applyCloudPayload(payload){
-  if(!payload||payload.type!=='bookkeeping-cloud'||!payload.allData||typeof payload.allData!=='object'){
-    throw new Error('云端账本数据格式不正确');
-  }
-  cloudApplying=true;
-  try{
-    income=Number(payload.income)||0;
-    balance=Number(payload.balance)||0;
-    allData=payload.allData;
-    summaryFontSize=Math.min(24,Math.max(12,Number(payload.summaryFontSize)||14));
-    localStorage.setItem(KI,String(income));
-    localStorage.setItem(KB,String(balance));
-    localStorage.setItem(KD,JSON.stringify(allData));
-    localStorage.setItem(KF,String(summaryFontSize));
-    render();
-  }finally{
-    cloudApplying=false;
-  }
-}
-
-function markBookkeepingChanged(){
-  if(!cloudTracking||cloudApplying)return;
-  localStorage.setItem(CLOUD_LOCAL_CHANGED_KEY,String(Date.now()));
-  scheduleCloudSave();
-}
-
-function scheduleCloudSave(){
-  if(!cloudReady||!cloudSession)return;
-  clearTimeout(cloudSaveTimer);
-  cloudSaveTimer=null;
-  if(cloudSaving){
-    cloudSaveAgain=true;
-    setCloudStatus('正在上传云端…','cloud-warn');
-    return;
-  }
-  cloudSaveTimer=setTimeout(()=>saveCloudNow(false),1400);
-  setCloudStatus('本机已保存，等待上传云端…','cloud-warn');
-}
-
-async function saveCloudNow(showNotice=true){
-  if(!cloudClient||!cloudSession)return false;
-  if(cloudSaving){cloudSaveAgain=true;return false;}
-  cloudSaving=true;
-  clearTimeout(cloudSaveTimer);
-  cloudSaveTimer=null;
-  try{
-    if(showNotice)setCloudStatus('正在上传本机数据…','cloud-warn');
-    const now=new Date().toISOString();
-    const row={
-      user_id:cloudSession.user.id,
-      payload:collectCloudPayload(),
-      client_updated_at:now,
-      updated_at:now
-    };
-    const {error}=await cloudClient.from(CLOUD_TABLE).upsert(row,{onConflict:'user_id'});
-    if(error)throw error;
-    localStorage.setItem(CLOUD_LOCAL_CHANGED_KEY,String(Date.parse(now)));
-    const time=new Date().toLocaleTimeString('zh-CN',{hour:'2-digit',minute:'2-digit',hour12:false});
-    setCloudStatus(`已上传云端 · ${time}`,'cloud-ok');
-    return true;
-  }catch(error){
-    setCloudStatus('云同步失败：'+cloudErrorText(error),'cloud-warn');
-    return false;
-  }finally{
-    cloudSaving=false;
-    if(cloudSaveAgain){cloudSaveAgain=false;scheduleCloudSave();}
-  }
-}
-
-async function fetchCloudRow(){
-  const {data,error}=await cloudClient.from(CLOUD_TABLE)
-    .select('payload,client_updated_at,updated_at')
-    .eq('user_id',cloudSession.user.id)
-    .maybeSingle();
-  if(error)throw error;
-  return data;
-}
-
-async function downloadCloudNow(ask=false){
-  if(!cloudSession)return;
-  if(ask&&!confirm('确定用云端账本覆盖本机账本吗？'))return;
-  try{
-    setCloudStatus('正在下载云端账本…','cloud-warn');
-    const row=await fetchCloudRow();
-    if(!row){setCloudStatus('云端还没有账本，请先上传本机数据','cloud-warn');return;}
-    await applyCloudPayload(row.payload);
-    const syncedAt=Date.parse(row.client_updated_at||row.updated_at)||Date.now();
-    localStorage.setItem(CLOUD_LOCAL_CHANGED_KEY,String(syncedAt));
-    setCloudStatus('云端账本已下载到本机','cloud-ok');
-  }catch(error){
-    setCloudStatus('下载失败：'+cloudErrorText(error),'cloud-warn');
-  }
-}
-
-async function startCloudSession(session){
-  cloudSession=session;
-  cloudReady=false;
-  cloudTracking=false;
-  updateCloudPanels();
-  try{
-    const row=await fetchCloudRow();
-    if(row){
-      const cloudAt=Date.parse(row.client_updated_at||row.updated_at)||0;
-      const localAt=Number(localStorage.getItem(CLOUD_LOCAL_CHANGED_KEY))||0;
-      if(!localAt&&hasMeaningfulLocalData()){
-        cloudReady=true;
-        cloudTracking=true;
-        setCloudStatus('本机和云端都有账本，请选择“上传本机数据”或“下载云端数据”','cloud-warn');
-        return;
-      }
-      if(localAt>cloudAt+1000)await saveCloudNow(false);
-      else{
-        await applyCloudPayload(row.payload);
-        localStorage.setItem(CLOUD_LOCAL_CHANGED_KEY,String(cloudAt||Date.now()));
-      }
-    }else{
-      await saveCloudNow(false);
-    }
-    cloudReady=true;
-    cloudTracking=true;
-    setCloudStatus(`已登录并同步 · ${session.user.email||'云账号'}`,'cloud-ok');
-  }catch(error){
-    cloudReady=true;
-    cloudTracking=true;
-    setCloudStatus('登录成功，但同步失败：'+cloudErrorText(error),'cloud-warn');
-  }
-}
-
-async function initCloudSync(){
-  if(!window.supabase||!window.supabase.createClient){
-    setCloudStatus('云同步组件加载失败；账本仍保存在本机','cloud-warn');
-    return;
-  }
-  cloudClient=window.supabase.createClient(CLOUD_PROJECT_URL,CLOUD_PUBLISHABLE_KEY,{
-    auth:{persistSession:true,autoRefreshToken:true,detectSessionInUrl:true}
-  });
-  const {data,error}=await cloudClient.auth.getSession();
-  if(error)setCloudStatus('读取登录状态失败：'+cloudErrorText(error),'cloud-warn');
-  if(data&&data.session)await startCloudSession(data.session);
-  else{cloudTracking=true;updateCloudPanels();}
-
-  cloudClient.auth.onAuthStateChange((event)=>{
-    if(event==='SIGNED_OUT'){
-      cloudSession=null;
-      cloudReady=false;
-      cloudTracking=true;
-      updateCloudPanels();
-      setCloudStatus('已退出云同步；账本仍会保存在本机','cloud-warn');
-    }
-  });
-}
-
-document.querySelector('#cloudLogin').onclick=async()=>{
-  if(!cloudClient){setCloudStatus('云同步组件还没有加载，请刷新网页重试','cloud-warn');return;}
-  const email=document.querySelector('#cloudEmail').value.trim();
-  const password=document.querySelector('#cloudPassword').value;
-  if(!email||password.length<6){setCloudStatus('请输入邮箱和至少 6 位密码','cloud-warn');return;}
-  setCloudStatus('正在登录…','cloud-warn');
-  const {data,error}=await cloudClient.auth.signInWithPassword({email,password});
-  if(error){setCloudStatus('登录失败：'+cloudErrorText(error),'cloud-warn');return;}
-  await startCloudSession(data.session);
-};
-
-document.querySelector('#cloudSignup').onclick=async()=>{
-  if(!cloudClient){setCloudStatus('云同步组件还没有加载，请刷新网页重试','cloud-warn');return;}
-  const email=document.querySelector('#cloudEmail').value.trim();
-  const password=document.querySelector('#cloudPassword').value;
-  if(!email||password.length<6){setCloudStatus('请输入邮箱和至少 6 位密码','cloud-warn');return;}
-  setCloudStatus('正在注册…','cloud-warn');
-  const {data,error}=await cloudClient.auth.signUp({email,password});
-  if(error){setCloudStatus('注册失败：'+cloudErrorText(error),'cloud-warn');return;}
-  if(data.session)await startCloudSession(data.session);
-  else setCloudStatus('注册邮件已发送，请打开邮箱确认后登录','cloud-ok');
-};
-
-document.querySelector('#cloudUploadNow').onclick=async()=>{
-  if(confirm('确定用本机账本覆盖云端账本吗？'))await saveCloudNow(true);
-};
-document.querySelector('#cloudDownloadNow').onclick=()=>downloadCloudNow(true);
-document.querySelector('#cloudLogout').onclick=async()=>{
-  if(cloudClient)await cloudClient.auth.signOut();
-};
-
-window.addEventListener('online',()=>{if(cloudReady)scheduleCloudSave();});
-document.addEventListener('visibilitychange',async()=>{
-  if(document.visibilityState!=='visible'){
-    if(cloudReady&&!cloudSaving)saveCloudNow(false);
-    return;
-  }
-  if(!cloudReady||cloudSaving)return;
-  try{
-    const row=await fetchCloudRow();
-    const cloudAt=row?(Date.parse(row.client_updated_at||row.updated_at)||0):0;
-    const localAt=Number(localStorage.getItem(CLOUD_LOCAL_CHANGED_KEY))||0;
-    if(row&&cloudAt>localAt+1000)await downloadCloudNow(false);
-  }catch(e){}
-});
-
+function markBookkeepingChanged(){}
 
 function searchBills(){
   const input=document.querySelector('#billSearch');
@@ -1100,7 +836,7 @@ document.querySelector('#recordDate').addEventListener('change',e=>{
   if(e.target.value) setSelectedDate(e.target.value);
 });
 render();
-initCloudSync();
+
 if('serviceWorker' in navigator)navigator.serviceWorker.register('./sw.js').catch(()=>{});
 </script>
 </body>
